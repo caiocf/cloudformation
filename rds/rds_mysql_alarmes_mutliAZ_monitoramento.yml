@@ -1,0 +1,377 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::SecretsManager-2020-07-23
+Description: Banco de Dados MySQL RDS
+
+Parameters:
+  EmailAddress:
+    Type: String
+    Description: The email address to use for alarm notifications.
+    Default: 'meu_email@hotmail.com'
+  RDSInstanceName:
+    Type: 'String'
+    Description: Nome do Banco de Dados
+    Default: 'meubanco'
+  RDSInstancePubliclyAcess:
+    Description: Habilita o acesso pela internet
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  RDSUsername:
+    Type: String
+    Description: Nome usuario master
+    Default: dbuser
+    NoEcho: true
+  RDSInstanceType:
+    Type: String
+    Description: Tipo instancia RDS
+    Default: db.m5.large
+  VPCID:
+    Description: VPCID
+    Type: 'AWS::EC2::VPC::Id'
+    Default: 'vpc-d1e96aab'
+  VPCIDCIDR:
+    Description: vpc cidr para criacao de security group
+    Type: 'String'
+    Default: '172.31.0.0/16'
+  PrivateSubnetOne:
+    Description: PrivateSubnetOne
+    Type: 'AWS::EC2::Subnet::Id'
+    Default: 'subnet-d0f8d1df'
+  PrivateSubnetTwo:
+    Description: PrivateSubnetTwo
+    Type: 'AWS::EC2::Subnet::Id'
+    Default: 'subnet-50a6d60c'
+  DBAllocatedStorage:
+    Description: Disco do banco de dados
+    Type: Number
+    Default: '20'
+  MultiAZ:
+    Description: Multi-AZ
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  MonitoringInterval:
+    Description: Especificar o valor entre 0,1,5,10,15,30, 60
+    Type: Number
+    Default: '15'
+  BpkRetentionPeriod:
+    Description: Periodo dos backups a serem retidos, deve ser um valor de 0 a 35. O valor zero desativa backups automatizados.
+    Type: Number
+    Default: '1'
+  BpkWindows:
+    Description: O intervalo de tempo diario durante o qual os backups automatizados serao criados. Deve estar no formato hh24:mi-hh24:mi
+    Type: String
+    Default: '03:15-04:15'
+  EnablePerformanceInsights:
+    Description: Habilita o uso do parametro insights
+    Type: String
+    Default: 'True'
+    AllowedValues:
+      - 'True'
+      - 'False'
+  PerformanceInsightsRetentionPeriod:
+    Description: Tempo de retencao dao performance insights, valores validos de 7 a 731
+    Type: Number
+    Default: 7
+Conditions:
+  HasPerformanceInsightsRetentionPeriod: !Not [!Equals [!Ref PerformanceInsightsRetentionPeriod, 0]]
+
+Resources:
+  RDSSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: Subnet Group for RDS Instance
+      SubnetIds:
+        - !Ref PrivateSubnetOne
+        - !Ref PrivateSubnetTwo
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Ref RDSInstanceName
+      VpcId: !Ref VPCID
+      SecurityGroupIngress:
+        #- CidrIp: !Ref VPCIDCIDR
+        - CidrIp: 0.0.0.0/0
+          FromPort: 3306
+          IpProtocol: tcp
+          ToPort: 3306
+
+   #This is a Secret resource with a randomly generated password in its SecretString JSON.
+  MyRDSInstanceRotationSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: 'This is my rds instance secret'
+      Name: /prod/databases/dbserver1
+      GenerateSecretString:
+        SecretStringTemplate: '{"username": "admin"}'
+        GenerateStringKey: 'password'
+        PasswordLength: 16
+        #ExcludeCharacters: '"@/\'
+        ExcludePunctuation: True
+
+  #This is a SecretTargetAttachment resource which updates the referenced Secret resource with properties about
+  #the referenced RDS instance
+  SecretRDSInstanceAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref MyRDSInstanceRotationSecret
+      TargetId: !Ref RDSIntance
+      TargetType: AWS::RDS::DBInstance
+
+
+  #This is a RotationSchedule resource. It configures rotation of password for the referenced secret using a rotation lambda
+  #The first rotation happens at resource creation time, with subsequent rotations scheduled according to the rotation rules
+  #We explicitly depend on the SecretTargetAttachment resource being created to ensure that the secret contains all the
+  #information necessary for rotation to succeed
+  MySecretRotationSchedule:
+    Type: AWS::SecretsManager::RotationSchedule
+    DependsOn: SecretRDSInstanceAttachment
+    Properties:
+      SecretId: !Ref MyRDSInstanceRotationSecret
+      HostedRotationLambda:
+        RotationType: MySQLSingleUser
+        RotationLambdaName: SecretsManagerRotation
+        VpcSecurityGroupIds: !Ref RDSSecurityGroup
+      RotationRules:
+        AutomaticallyAfterDays: 30
+
+  RDSInstanceEndpointSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${RDSInstanceName}-RDSInstanceEndpointSecret"
+      Description: 'Este e o endpoint secret da instancia do RDS'
+      SecretString: !Join
+        - '/'
+        - - 'jdbc:mysql:/'
+          - !GetAtt RDSIntance.Endpoint.Address
+          - !Ref RDSInstanceName
+
+  RDSIntance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: !Ref 'DBAllocatedStorage'
+      DBInstanceClass: !Ref RDSInstanceType
+      Engine: MySQL
+      EngineVersion: "8.0.17"
+      MasterUsername: !Sub '{{resolve:secretsmanager:${MyRDSInstanceRotationSecret}::username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${MyRDSInstanceRotationSecret}::password}}'
+      DBInstanceIdentifier: !Ref RDSInstanceName
+      DBName: !Ref RDSInstanceName
+      MultiAZ: !Ref MultiAZ
+      DBSubnetGroupName: !Ref RDSSubnetGroup
+      PubliclyAccessible: !Ref RDSInstancePubliclyAcess
+      StorageEncrypted: True
+      CopyTagsToSnapshot: true
+      AutoMinorVersionUpgrade: false
+      EnableIAMDatabaseAuthentication: true
+      BackupRetentionPeriod: !Ref BpkRetentionPeriod
+      PreferredBackupWindow: !Ref BpkWindows
+      MonitoringInterval: !Ref MonitoringInterval
+      VPCSecurityGroups:
+        - Ref: RDSSecurityGroup
+      EnablePerformanceInsights: !Ref EnablePerformanceInsights
+      PerformanceInsightsRetentionPeriod: !If [HasPerformanceInsightsRetentionPeriod, !Ref PerformanceInsightsRetentionPeriod, !Ref 'AWS::NoValue' ]
+      MonitoringRoleArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/rds-monitoring-role'
+      EnableCloudwatchLogsExports: ["error","general","slowquery" ]
+      StorageType: gp2
+
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: AlarmTopic
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref EmailAddress
+  RDSEventSubscription:
+    Type: AWS::RDS::EventSubscription
+    Properties:
+      Enabled: 'true'
+      EventCategories:
+        - availability
+        - backup
+        - configuration change
+        - deletion
+        - failover
+        - failure
+        - low storage
+        - maintenance
+        - notification
+        - recovery
+        - restoration
+      SnsTopicArn:
+        Ref: NotificationTopic
+      SourceType: db-instance
+      SourceIds:
+        - Ref: RDSInstanceName
+  RDSCPUUtilization:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ActionsEnabled: 'true'
+      AlarmActions:
+        - Ref: NotificationTopic
+      AlarmDescription: RDS CPU Utilization
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value:
+            Ref: RDSInstanceName
+      EvaluationPeriods: '1'
+      InsufficientDataActions:
+        - Ref: NotificationTopic
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: '300'
+      Threshold: '75'
+      Unit: Percent
+  RDSFreeStorageSpace:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ActionsEnabled: 'true'
+      AlarmActions:
+        - Ref: NotificationTopic
+      AlarmDescription: RDS Free Storage Space
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value:
+            Ref: RDSInstanceName
+      EvaluationPeriods: '1'
+      InsufficientDataActions:
+        - Ref: NotificationTopic
+      MetricName: FreeStorageSpace
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: '300'
+      #  Alarm when less than 1G of space is left
+      Threshold: '1000000000'
+      Unit: Bytes
+  RDSDiskQueueDepth:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ActionsEnabled: 'true'
+      AlarmActions:
+        - Ref: NotificationTopic
+      AlarmDescription: RDS Disk Queue Depth
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value:
+            Ref: RDSInstanceName
+      EvaluationPeriods: '1'
+      InsufficientDataActions:
+        - Ref: NotificationTopic
+      MetricName: DiskQueueDepth
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: '300'
+      Threshold: 10
+      Unit: Count
+  RDSFreeableMemory:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ActionsEnabled: 'true'
+      AlarmActions:
+        - Ref: NotificationTopic
+      AlarmDescription: RDS Freeable Memory
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value:
+            Ref: RDSInstanceName
+      EvaluationPeriods: '1'
+      InsufficientDataActions:
+        - Ref: NotificationTopic
+      MetricName: FreeableMemory
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: '300'
+      Threshold: '2536870912'
+      Unit: Bytes
+  RDSWriteLatency:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ActionsEnabled: 'true'
+      AlarmActions:
+        - Ref: NotificationTopic
+      AlarmDescription: RDS Write Latency
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value:
+            Ref: RDSInstanceName
+      EvaluationPeriods: '1'
+      InsufficientDataActions:
+        - Ref: NotificationTopic
+      MetricName: WriteLatency
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: '300'
+      Threshold: 0.1
+      Unit: Milliseconds
+  RDSDatabaseConnections:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ActionsEnabled: 'true'
+      AlarmActions:
+        - Ref: NotificationTopic
+      AlarmDescription: RDS Database Connections
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value:
+            Ref: RDSInstanceName
+      EvaluationPeriods: '1'
+      InsufficientDataActions:
+        - Ref: NotificationTopic
+      MetricName: DatabaseConnections
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: '300'
+      Threshold: '50'
+      Unit: Count
+Outputs:
+  RDSIntanceName:
+    Value: !Ref RDSInstanceName
+    Export:
+      Name: !Sub "${RDSInstanceName}-RDSInstanceName"
+  RDSEndpoint:
+    Value: !Ref RDSInstanceEndpointSecret
+    Export:
+      Name: !Sub "${RDSInstanceName}-RDSEndpoint"
+  RDSInstanceUserSecret:
+    Value: !Sub '{{resolve:secretsmanager:${MyRDSInstanceRotationSecret}::username}}'
+    Export:
+      Name: !Sub "${RDSInstanceName}-RDSInstanceUserSecret"
+  RDSInstancePasswordSecret:
+    Value: !Sub '{{resolve:secretsmanager:${MyRDSInstanceRotationSecret}::password}}'
+    Export:
+      Name: !Sub "${RDSInstanceName}-RDSInstancePasswordSecret"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
