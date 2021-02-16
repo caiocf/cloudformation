@@ -1,0 +1,29 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  AWS CloudFormation Server EC2
+Resources:
+  WebServers:
+    Type: AWS::EC2::Instance
+    Properties:
+      AvailabilityZone: !Select
+        - 0
+        - Fn::GetAZs: !Ref 'AWS::Region'    # Pega a primeira AZ da lista
+      ImageId: ami-02bcbb802e03574ba
+      InstanceType: t2.micro
+      KeyName: LinuxServerAWS  # Deve criar uma Pair Key com o nome LinuxServerAWS
+      SecurityGroups:
+        - !Ref NewSecurityGroup
+
+  NewSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: allow connections from specified CIDR ranges
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
